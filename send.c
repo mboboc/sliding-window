@@ -10,8 +10,6 @@
 #define HOST "127.0.0.1"
 #define PORT 10000
 
-/* data_size reprezinta cat am citit din fisier, cata informatie utila se afla in payload*/
-
 typedef struct {
     int seq_number;
     int checksum;
@@ -29,92 +27,163 @@ void quick_pack(msg *t, int seq_number, int checksum, char *buffer, int data_siz
     t->len = data_size;
 }
 
-void pack_akn(msg *t, int seq_number) {
-    pkt_t pkt;
-    pkt.seq_number = seq_number;
-    pkt.checksum = 0;
-    memset(t, 0, sizeof(msg));
-    memcpy(t->payload, &pkt, sizeof(pkt_t));
-    t->len = -100; //AKN
-}
-
+/* converts payload to pkt */
 void back_to_pkt(msg *t, pkt_t *pkt) {
     *pkt = *((pkt_t *)t->payload);
 }
 
+/* finds index of akn msg in msg_buffer */
+int find_index(msg *msg_buffer, int size, int index) {
+    int i;
+    pkt_t pkt;
+
+    for (i = 0; i < size; i++) {
+        back_to_pkt(&(msg_buffer[i]), &pkt);
+        if (pkt.seq_number == index) {
+            return 1;
+        }
+    }
+    return -1;
+}
+
+/* returns size of file */
+long int findSize(const char *file_name) {
+    struct stat st;
+
+    if (stat(file_name, &st) == 0)
+        return (st.st_size);
+    else
+        return -1;
+}
+
+/* returns numbers of pkts needed to send a file */
+int return_nb_of_pkt(int file_size) {
+    if (file_size % (MSGSIZE - 2 * sizeof(int)) != 0) {
+        return file_size / (MSGSIZE - 2 * sizeof(int)) + 1;
+    } else {
+        return file_size / (MSGSIZE - 2 * sizeof(int));
+    }
+}
+
+/* debugging */
+void print_msg_buffer(msg *msg_buffer, int size) {
+    int i;
+    pkt_t pkt;
+    for (i = 0; i < size; i++) {
+        back_to_pkt(&(msg_buffer[i]), &pkt);
+        printf("%d ", pkt.seq_number);
+    }
+    printf("\n");
+}
+
 int main(int argc, char** argv) {
     msg     r, t;
-    pkt_t   pkt_r;
-    int     bdp;
-    int     data_size, wdw_size;
-    int     buffer_size = MSGSIZE - 2 * sizeof(int);
-    int     count_send, i, fid, flag = -1;
-    int     openFlags = O_CREAT | O_RDWR;
+    pkt_t   pkt;
+    int     openFlags = O_RDWR;
     int     filePerms = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
+    int     bdp, wdw_size, data_size, n_of_pkt;
+    int     data_capacity = MSGSIZE - 2 * sizeof(int);
+    int     count_send, i, fid, flag, lost = -1;
+    long    file_size;
 
     init(HOST, PORT);
-
-    /* bandwidth delay product */
-    bdp = atol(argv[2]) * atol(argv[3]) * 1000;
+    bdp = atoi(argv[2]) * atoi(argv[3]) * 1000;
     wdw_size = bdp / MSGSIZE;
-    printf("[SEND]: Window size = %d.\n", wdw_size);
-    //msg     t_buffer[wdw_size];
-    /* create pkt with name and send*/
-    quick_pack(&t, 0, 0, argv[1], strlen(argv[1])); // trimit numele cu terminatorul de sir
-    printf("[SEND]:Sending file name.\n");
-    send_message(&t);
-    recv_message(&r);
-    back_to_pkt(&r, &pkt_r);
-    printf("[SEND]: Got akn for file name with seq = %d. \n", pkt_r.seq_number);
 
-    fid = open(argv[1], openFlags, filePerms);
-    if (fid < 0) {
-        printf("[SEND]: Send error: file not open.\n");
+    msg     msg_buffer[wdw_size];
+
+    /* create pkt with name & size and send*/
+    file_size = findSize(argv[1]);
+    n_of_pkt = return_nb_of_pkt(file_size);
+    quick_pack(&t, 0, 0, argv[1], n_of_pkt);
+    while (lost == -1) {
+        send_message(&t);
+        lost = recv_message_timeout(&r, atoi(argv[3]) * 2);
     }
 
-    printf("[SEND]: Starting to read from file.\n");
-    char buffer[buffer_size + 1];
-    count_send = 1;
+    /* open file to read */
+    fid = open(argv[1], openFlags, filePerms);
+    if (fid < 0) {
+        printf("[SEND]: file not open.\n");
+        return -1;
+    }
+
+    /* send window */
+    char buffer[data_capacity + 1];
+    count_send = 2;
+    flag = -1;
     while (count_send <= wdw_size) {
-        data_size = read(fid, &buffer, buffer_size);
+        data_size = read(fid, &buffer, data_capacity);
         printf("[SEND]: Current sequence = %d with size %d.\n", count_send, data_size);
-        // if there are less packets than wdw_size
         if (data_size <= 0) {
-            printf("Am citit 0 bytes.\n");
-            quick_pack(&t, -1, 0, buffer, data_size); //seq_number = -1 means end of transmission
-            send_message(&t);
             flag = i;
             break;
         }
-        quick_pack(&t, count_send, 0, buffer, data_size); //dimesniunea e in octeti
+        quick_pack(&t, count_send, 0, buffer, data_size);
         send_message(&t);
-        memset(buffer, 0, buffer_size);
+        msg_buffer[i] = t;
+        memset(buffer, 0, data_capacity);
         i++;
         count_send++;
     }
+    count_send--;
+
+    /* wait for akn and continue to send */
+    int     k;
+    pkt_t   pkt_aux;
+    int     seq;
+    int     index;
     if (flag < 0) {
-        while ((data_size = read(fid, buffer, buffer_size)) > 0) {
-            recv_message(&r);
-            // if I finished
-            if (data_size < 0) {
-                quick_pack(&t, -1, 0, buffer, data_size); //seq_number = -1 means end of transmission
+        i = 0;
+        while ((data_size = read(fid, buffer, data_capacity)) > 0) {
+            lost = recv_message_timeout(&r, atol(argv[3]) * 2);
+            if (lost == -1) {
+                printf("[SEND] Resending...");
+                for (k = 0; k < wdw_size; k++) {
+                    send_message(&(msg_buffer[k]));
+                }
+            } else {
+                if (data_size < 0) {
+                    break;
+                }
+                back_to_pkt(&r, &pkt_aux);
+                seq = pkt_aux.seq_number;
+                index = find_index(msg_buffer, wdw_size, seq);
+                quick_pack(&(msg_buffer[index]), count_send, 0, buffer, data_size);
+                quick_pack(&t, count_send, 0, buffer, data_size); //dimesniunea e in octeti
                 send_message(&t);
-                break;
+                printf("[SEND]: Current sequence = %d with size %d.\n", count_send, data_size);
+                memset(buffer, 0, data_capacity);
+                count_send++;
             }
-            quick_pack(&t, count_send, 0, buffer, data_size); //dimesniunea e in octeti
-            send_message(&t);
-            memset(buffer, 0, buffer_size);
-            count_send++;
+        }
+        flag = wdw_size;
+    }
+
+    /* receive last akn */
+    i = 0;
+    pkt_t aux;
+    while (i < flag) {
+        lost = recv_message_timeout(&r, 100 * atol(argv[3]));
+        if (lost == -1) {
+            printf("[SEND] Resending...");
+            for (k = 0; k < flag; k++) {
+                back_to_pkt(&(msg_buffer[k]), &pkt);
+                if (pkt.seq_number != -100) {
+                    send_message(&(msg_buffer[k]));
+                }
+            }
+        } else {
+            back_to_pkt(&r, &pkt);
+            for (k = 0; k < flag; k++) {
+                back_to_pkt(&(msg_buffer[k]), &aux);
+                if (aux.seq_number == pkt.seq_number) {
+                    quick_pack(&(msg_buffer[k]), -100, 0, pkt.data, msg_buffer[k].len);
+                }
+            }
+            i++;
         }
     }
-    i = 0;
-    if (flag == -1)
-        flag = wdw_size;
-    while (i < flag) {
-        recv_message(&r);
-        back_to_pkt(&r, &pkt_r);
-        printf("[SEND]: Am primit ACK pentru %d\n", pkt_r.seq_number);
-        i++;
-    }
+
     return 0;
 }
