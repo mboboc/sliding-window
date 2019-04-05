@@ -19,10 +19,13 @@ typedef struct {
 /* prepares pkt and packs pkt_t structure into payload of msg */
 void quick_pack(msg *t, int seq_number, int checksum, char *buffer, int data_size) {
     pkt_t pkt;
+
+    memset(&pkt, 0, sizeof(pkt_t));
+    memset(t, 0, sizeof(msg));
+
     pkt.seq_number = seq_number;
     pkt.checksum = checksum;
     memcpy(pkt.data, buffer, data_size);
-    memset(t, 0, sizeof(msg));
     memcpy(t->payload, &pkt, sizeof(pkt_t));
     t->len = data_size;
 }
@@ -40,7 +43,7 @@ int find_index(msg *msg_buffer, int size, int index) {
     for (i = 0; i < size; i++) {
         back_to_pkt(&(msg_buffer[i]), &pkt);
         if (pkt.seq_number == index) {
-            return 1;
+            return i;
         }
     }
     return -1;
@@ -88,9 +91,10 @@ int main(int argc, char** argv) {
 
     init(HOST, PORT);
     bdp = atoi(argv[2]) * atoi(argv[3]) * 1000;
-    wdw_size = bdp / MSGSIZE;
-
+    wdw_size = bdp / (MSGSIZE * 8);
+    printf("Window size: %d\n", wdw_size);
     msg     msg_buffer[wdw_size];
+    memset(msg_buffer, 0, sizeof(msg) * wdw_size);
 
     /* create pkt with name & size and send*/
     file_size = findSize(argv[1]);
@@ -112,7 +116,7 @@ int main(int argc, char** argv) {
     char buffer[data_capacity + 1];
     count_send = 2;
     flag = -1;
-    while (count_send <= wdw_size) {
+    while (count_send < wdw_size + 2) {
         data_size = read(fid, &buffer, data_capacity);
         printf("[SEND]: Current sequence = %d with size %d.\n", count_send, data_size);
         if (data_size <= 0) {
@@ -130,34 +134,46 @@ int main(int argc, char** argv) {
 
     /* wait for akn and continue to send */
     int     k;
-    pkt_t   pkt_aux;
+    pkt_t   pkt_i;
     int     seq;
     int     index;
     if (flag < 0) {
         i = 0;
-        while ((data_size = read(fid, buffer, data_capacity)) > 0) {
+        while (1) {
             lost = recv_message_timeout(&r, atol(argv[3]) * 2);
+            memset(&pkt, 0, sizeof(pkt_t));
+            back_to_pkt(&r, &pkt);
+            data_size = read(fid, buffer, data_capacity);
+            if (data_size <= 0) {
+                for (k = 0; k < wdw_size; k++) {
+                    memset(&pkt_i, 0, sizeof(pkt_t));
+                    back_to_pkt(&(msg_buffer[k]), &pkt_i);
+                    if (pkt_i.seq_number == pkt.seq_number) {
+                        memset(&(msg_buffer[k]), 0, sizeof(msg));
+                        quick_pack(&(msg_buffer[k]), -100, 0, pkt.data, msg_buffer[k].len);
+                    }
+                }
+                break;
+            }
             if (lost == -1) {
                 printf("[SEND] Resending...");
                 for (k = 0; k < wdw_size; k++) {
                     send_message(&(msg_buffer[k]));
                 }
+                memset(buffer, 0, data_capacity);
             } else {
-                if (data_size < 0) {
-                    break;
-                }
-                back_to_pkt(&r, &pkt_aux);
-                seq = pkt_aux.seq_number;
+                seq = pkt.seq_number;
                 index = find_index(msg_buffer, wdw_size, seq);
-                quick_pack(&(msg_buffer[index]), count_send, 0, buffer, data_size);
-                quick_pack(&t, count_send, 0, buffer, data_size); //dimesniunea e in octeti
+                memset(&(msg_buffer[index]), 0, sizeof(msg));
+                quick_pack(&t, count_send, 0, buffer, data_size);
+                msg_buffer[index] = t; 
                 send_message(&t);
                 printf("[SEND]: Current sequence = %d with size %d.\n", count_send, data_size);
                 memset(buffer, 0, data_capacity);
                 count_send++;
             }
         }
-        flag = wdw_size;
+        flag = wdw_size - 1;
     }
 
     /* receive last akn */
@@ -168,14 +184,17 @@ int main(int argc, char** argv) {
         if (lost == -1) {
             printf("[SEND] Resending...");
             for (k = 0; k < flag; k++) {
+                memset(&pkt, 0, sizeof(pkt_t));
                 back_to_pkt(&(msg_buffer[k]), &pkt);
                 if (pkt.seq_number != -100) {
                     send_message(&(msg_buffer[k]));
                 }
             }
         } else {
+            memset(&pkt, 0, sizeof(pkt_t));
             back_to_pkt(&r, &pkt);
             for (k = 0; k < flag; k++) {
+                memset(&aux, 0, sizeof(pkt_t));
                 back_to_pkt(&(msg_buffer[k]), &aux);
                 if (aux.seq_number == pkt.seq_number) {
                     quick_pack(&(msg_buffer[k]), -100, 0, pkt.data, msg_buffer[k].len);

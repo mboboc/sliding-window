@@ -18,6 +18,15 @@ void back_to_pkt(msg *t, pkt_t *pkt) {
     *pkt = *((pkt_t *)t->payload);
 }
 
+void pack_akn(msg *t, pkt_t *pkt, int seq_number) {
+    memset(pkt, 0, sizeof(pkt_t));
+    pkt->seq_number = seq_number;
+    pkt->checksum = 0;
+    memset(t, 0, sizeof(msg));
+    memcpy(t->payload, pkt, sizeof(pkt_t));
+    t->len = -100;
+}
+
 int main(int argc, char** argv) {
     msg r, t;
     pkt_t pkt_file_name, pkt, pkt_r;
@@ -27,6 +36,7 @@ int main(int argc, char** argv) {
     char ofile_name[10];
     int n_of_pkt;
 
+    memset(&r, 0, sizeof(msg));
     recv_message(&r);
     n_of_pkt = r.len;
     back_to_pkt(&r, &pkt_file_name);
@@ -42,6 +52,7 @@ int main(int argc, char** argv) {
     }
 
     while (n_of_pkt--) {
+        memset(&r, 0, sizeof(msg));
         recv_message(&r);
         back_to_pkt(&r, &pkt_r);
         printf("[RECV]: Recieved:%d.\n", pkt_r.seq_number);
